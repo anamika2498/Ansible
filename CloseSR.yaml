@@ -1,0 +1,19 @@
+---
+  - name: Close Incident
+    hosts: localhost
+    connection: local
+    tasks:
+     - name: Close record in sc_task_table
+       servicenow.itsm.api:
+        resource: sc_task
+        instance:
+           host: '{{ lookup("env","SN_HOST") }}'
+# "https://nseindiadev.service-now.com"
+           username: '{{ lookup("env","SN_USERNAME") }}'
+           password: '{{ lookup("env","SN_PASSWORD") }}'
+        action: patch
+        sys_id: "{{sys_id}}"
+        data: 
+          state: 3
+          work_notes: "{{TASK_WorkNotes}}"
+       register: testvariable
