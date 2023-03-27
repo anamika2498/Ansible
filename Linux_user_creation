@@ -1,0 +1,224 @@
+# Linux User Creation
+- hosts: "{{host}}"
+  vars:
+      output_var: "{{TASK_WorkNotes}}"
+      res_var: "success"
+      os_var: "fail"
+      user_mount: "/{{ansible_hostname}}/users"
+  become: true
+  ignore_errors: yes
+  tasks:
+    - block:
+      - name: Include Email Variables 
+        include_vars:
+            file: Linux_smtp_var.yml
+            name: Linux_smtp_var
+
+ #STEP0   
+      - name: Validate if all the variables are defined
+        set_fact: 
+           output_var: "{{output_var}}  \n \n [******ERROR OCCURED*******] \n \n Insufficient Info for Linux User Creation \ n Hence Cannot proceed further."
+           res_var: "failed"
+        when: (uid == None) or (uid == "") or (host == None) or (host == "") or (username == None) or (username == "") or (requestor_email == None) or (requestor_email == "") or (sys_id == None) or (sys_id == "") or (ritm == None) or (ritm == "")
+        register: var_validate
+
+#STEP1
+      - set_fact:
+           output_var: "{{output_var}} \n \n  [******ERROR OCCURED*******] \n \n The system OS is not Linux and it is {{ansible_system}}."
+           res_var: "failed"
+        when: (ansible_system != 'Linux')
+      - set_fact:
+          output_var: "{{output_var}} \n The system OS is Linux."
+          os_var: "success"
+        when: (ansible_system == 'Linux') and (var_validate.skipped is defined)
+
+#STEP2
+      - name: "Check if user already available"
+        getent:
+          database: passwd
+          key: "{{username}}"
+          fail_key: false
+        when: (os_var == "success")
+        register: user_validation
+ 
+      - set_fact:
+          output_var: "{{output_var}} \n \n  [******ERROR OCCURED*******] \n \n User {{username}} already exist in system, Cannot proceed with Linux User creation."
+          res_var: "failed"
+        when: (os_var == "success") and (ansible_facts.getent_passwd[username] != none) 
+      - set_fact:
+          output_var: "{{output_var}} \n User {{username}} does not exist in the system, proceeding with Linux User creation."
+        when:  (os_var == "success") and (ansible_facts.getent_passwd[username] == none)
+      - set_fact:
+          output_var: "{{output_var}} \n \n  [******ERROR OCCURED*******] \n \n Error while validating User : {{user_validation.msg}}\n Hence not able to proceed further."
+          res_var: "failed"
+        when: (os_var == "success") and (user_validation.failed == True) 
+ 
+#STEP3
+      - name: Create a Backup folder if not exist
+        file:
+           path: /etc/etc_backup_files
+           state: directory
+        register: backup_file
+        
+      - name: Take backup of /etc/passwd
+        copy:
+          src: "/etc/passwd"
+          dest: "/etc/etc_backup_files/passwd_{{ritm}}"
+          remote_src: yes
+        when:  (res_var == "success") and (os_var == "success") and (ansible_facts.getent_passwd[username] == none) 
+        register: pass_backup
+ 
+      - set_fact:
+          output_var: "{{output_var}} \n \n  [******ERROR OCCURED*******] \n \n Error while taking backup of /etc/passwd : {{pass_backup.msg}} \n Hence not able to proceed further."
+          res_var: "failed"
+        when: (pass_backup.changed == false) and (pass_backup.msg is defined) and (pass_backup.failed == true)
+      - set_fact:
+          output_var: "{{output_var}} \n /etc/passwd Backup taken in the system sucessfully. Backup Path : {{pass_backup.dest}}"
+        when: (res_var == "success") and ((pass_backup.changed == true) or (pass_backup.changed == false)) and (pass_backup.failed == false)
+
+#STEP4
+      - name: Take backup of /etc/group
+        copy:
+            src: "/etc/group"
+            dest: "/etc/etc_backup_files/group_{{ritm}}"
+            remote_src: yes
+        when: (res_var == "success") and (os_var == "success") and (ansible_facts.getent_passwd[username] == none)  and ((pass_backup.changed == true) or (pass_backup.changed == false)) and (pass_backup.failed == false)
+        register: grp_backup
+      - set_fact:
+           output_var: "{{output_var}} \n \n  [******ERROR OCCURED*******] \n \n Error while taking Backup for  USER {{userName}} : {{grp_backup.msg}}\n Hence not able to proceed further."
+           res_var: "failed"
+        when: (os_var == "success") and (grp_backup.changed == false) and (grp_backup.msg is defined) and (grp_backup.failed == true)
+      - set_fact:
+           output_var: "{{output_var}} \n /etc/group Backup taken in the system sucessfully. Backup path: {{grp_backup.dest}}." 
+        when: (res_var == "success") and ((grp_backup.changed == true) or (grp_backup.changed == false)) and (grp_backup.failed == false)
+
+#STEP5
+      - name: Generate Random Password
+        set_fact:
+           password: "{{ lookup('password', '/dev/null/ chars=ascii_lowercase,ascii_uppercase,digits', seed=inventory_hostname ) }}"
+        when: (os_var == "success") and (res_var == "success") and (ansible_facts.getent_passwd[username] == none) and ((grp_backup.changed == true) or (grp_backup.changed == false)) and (grp_backup.failed == false)
+        register: password
+
+#STEP6
+      - name: Check if the /hostname/users mount exist
+        shell: "df -h"
+        when: (os_var == "success") and (password.ansible_facts.password is defined) 
+        register: mount
+
+      - set_fact:
+          output_var: "{{output_var}} \n Mount: {{user_mount}} is present in the system."
+        when: (password.ansible_facts.password is defined)  and (mount.stdout.find(user_mount) != -1 ) 
+      - set_fact:
+          output_var: "{{output_var}} \n Mount: {{user_mount}} does not exist in the system. User home directory will be /home"
+        when: (password.ansible_facts.password is defined) and (mount.stdout.find(user_mount) == -1 ) 
+ 
+ # STEP7
+      - name: Create user if /hostname/users mount is present
+        user:
+           name: "{{username}}"
+           password: "{{password.ansible_facts.password | password_hash('sha512')}}"
+           state: "present"
+           uid: "{{uid}}"
+           group: "nse"
+           groups: "nse"
+           home: "{{user_mount}}/{{username}}"
+        when: (res_var == "success") and (mount.changed == True) and (mount.stdout.find(user_mount) != -1)
+        register: userRecord_users
+
+      - set_fact:
+          output_var: "{{output_var}} Error while Creating USER {{username}} : {{userRecord_users.msg}}\n Hence not able to proceed further."
+          res_var: "failed"
+        when: (os_var == "success") and (userRecord_users.changed == false) and (userRecord_users.msg is defined)  and (password.ansible_facts.password is defined)
+      - set_fact:
+          output_var: "{{output_var}} \n \n  [******ERROR OCCURED*******] \n \n {{username}} already exist in the system, skipping User Creation."
+          res_var: "failed"
+        when: (os_var == "success") and (userRecord_users.msg is not defined) and (ansible_facts.getent_passwd[username] != none) and (password.ansible_facts.password is defined)
+      - set_fact:
+          output_var: "{{output_var}} \n {{username}} is created in system sucessfully with home directory as {{userRecord_users.home}}"
+        when: (os_var == "success") and (userRecord_users.changed == true) and (password.ansible_facts.password is defined)
+
+
+# #OR STEP7
+      - name: Create user if /hostname/users mount is not present
+        user:
+          name: "{{username}}"
+          password: "{{password.ansible_facts.password | password_hash('sha512')}}"
+          state: "present"
+          uid: "{{uid}}"
+          group: "nse"
+          groups: "nse"
+        when: (res_var == "success") and (mount.changed == True) and (mount.stdout.find(user_mount) == -1)
+        register: userRecord
+
+      - set_fact:
+          output_var: "{{output_var}} \n \n  [******ERROR OCCURED*******] \n \n Error while Creating USER {{username}} : {{userRecord.msg}}\n Hence not able to proceed further."
+          res_var: "failed"
+        when: (os_var == "success")  and (userRecord.changed == false) and (userRecord.msg is defined) and (password.ansible_facts.password is defined)
+      - set_fact:
+          output_var: "{{output_var}} \n {{username}} is created in system sucessfully with home direcory as {{userRecord.home}}"
+        when: (os_var == "success") and (userRecord.changed == true) and (password.ansible_facts.password is defined)
+
+#STEP8
+      - name: "Sending email to requested user"
+        mail:
+          host: "{{Linux_smtp_var.smtp_host}}"
+          port: "{{Linux_smtp_var.smtp_port}}"
+          from: "{{Linux_smtp_var.email_from}}"
+          to: "{{requestor_email}}"
+          cc: consultant_priyankad@nse.co.in
+          subject: "Linux user on-boardng on Server - {{host}}"
+          subtype: html
+          body: "Dear User,<br><br>Your request for new user creation has been completed. Please find below details to access the
+account.<br><br> Server : {{host}} <br><br>Username: {{username}} <br><br>Password: {{password.ansible_facts.password}} <br><br> Please change your password after first login using 'passwd' command. <br><br> Regards,<br>Infra Team"
+        delegate_to: localhost
+        when: (os_var == "success") and (userRecord_users.changed == True or userRecord.changed == True)  
+        register: mail_result
+ 
+      - set_fact:
+          output_var: "{{output_var}} \n Email Triggered sucessfully"
+        when: (os_var == "success") and (mail_result.msg is defined) and (userRecord_users.changed == True or userRecord.changed == True) and (mail_result.failed == false)
+      - set_fact:
+           output_var: "{{output_var}} \n Email Sending Skipped."
+           res_var: "failed"
+        when: (os_var == "success") and (mail_result.skipped is defined)
+      - set_fact:
+          output_var: "{{output_var}} \n \n  [******ERROR OCCURED*******] \n \n Error Found while sending Email: {{mail_result.msg}} \n Hence not able to proceed further"
+          res_var: "failed"
+        when: (os_var == "success") and (mail_result.msg is defined) and (userRecord_users.changed == True or userRecord.changed == True) and (mail_result.failed == true)
+
+      - name: Print Message
+        debug:
+           msg: "{{output_var}}"
+
+      rescue:
+      - name: "Error Occured"
+        set_fact:
+          output_var: "{{output_var}}\n."
+          res_var: "failed"
+
+      - name: Print Message
+        debug:
+           msg: "{{output_var}}"
+
+    - block:
+        - set_stats:
+              data:
+                TASK_SYSID: "{{sys_id}}"
+                TASK_STATE: 5
+                TASK_WorkNotes: "EXECUTION SUCCESS, Task is fulfilled by Ansible, Closing the Task. Please find execution output below : \n
+                    {{output_var}}"
+      when: res_var == "success"
+    - block:
+        - set_stats:
+              data:
+                TASK_SYSID: "{{sys_id}}"
+                TASK_STATE: 1
+                TASK_WorkNotes: "EXECUTION FAILED, Escalating Task for Manual Intervention. Please find below details : \n
+                    {{output_var}}"
+
+        - name: Job Validation
+          debug:
+             msg: "Job Failed"
+          failed_when: res_var == "failed"
+          ignore_errors: no
+      when: res_var == "failed"
